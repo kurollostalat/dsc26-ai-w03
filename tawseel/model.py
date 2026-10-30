@@ -43,62 +43,63 @@ categorical_features = [
 
 
 
+
 def add_history_features(df: pd.DataFrame) -> pd.DataFrame:
-        result = df.copy()
-        original_index_name = df.index.name
+    result = df.copy()
 
-        result["original_order"] = range(len(result))
-        result["original_index"] = result.index
+    result["original_order"] = range(len(result))
+    result["original_index"] = list(result.index)
 
-        history = (
-            result.groupby(["customer_id", "created_at"])
-            .size()
-            .groupby("customer_id").cumsum()
-            .groupby("customer_id").shift(1)
-            .to_frame(name="customer_prior_parcels")
-            .reset_index()
+    history = (
+        result.groupby(["customer_id", "created_at"], dropna=False)
+        .agg(
+            current_parcels=("failed", "size"),
+            current_failed=("failed", "sum")
         )
+        .reset_index()
+        .sort_values(["customer_id", "created_at"])
+    )
 
-        failed_history = (
-            result.groupby(["customer_id", "created_at"])["failed"]
-            .sum()
-            .groupby("customer_id").cumsum()
-            .groupby("customer_id").shift(1)
-            .rename("prior_failed")
-            .reset_index()
-        )
+    history["customer_prior_parcels"] = (
+        history.groupby("customer_id")["current_parcels"].cumsum()
+        - history["current_parcels"]
+    )
 
-        history = history.merge(
-            failed_history,
-            on=["customer_id", "created_at"],
-            how="left"
-        )
+    history["prior_failed"] = (
+        history.groupby("customer_id")["current_failed"].cumsum()
+        - history["current_failed"]
+    )
 
-        result = result.merge(
-            history,
-            on=["customer_id", "created_at"],
-            how="left",
-            sort=False
-        )
+    result = result.merge(
+        history[
+            ["customer_id", "created_at",
+             "customer_prior_parcels", "prior_failed"]
+        ],
+        on=["customer_id", "created_at"],
+        how="left",
+        sort=False
+    )
 
-        result["customer_prior_parcels"] = (
-            result["customer_prior_parcels"].fillna(0).astype(int)
-        )
+    result["customer_prior_parcels"] = (
+        result["customer_prior_parcels"].fillna(0).astype(int)
+    )
 
-        result["customer_prior_fail_rate"] = (
-            result["prior_failed"] / result["customer_prior_parcels"].replace(0, np.nan)
-        )
+    result["customer_prior_fail_rate"] = (
+        result["prior_failed"]
+        / result["customer_prior_parcels"].replace(0, np.nan)
+    )
 
-        result = result.sort_values("original_order")
-        result = result.set_index("original_index")
-        result.index.name = original_index_name
+    result = result.sort_values("original_order")
+    result.index = df.index.copy()
+    result.index.name = df.index.name
 
-        result.drop(
-            columns=["original_order", "prior_failed"],
-            inplace=True
-        )
+    result = result.drop(
+        columns=["original_order", "original_index", "prior_failed"]
+    )
 
-        return result
+    return result
+
+
 
 
 """Return a copy of df (same index and row order) with two new columns.
@@ -113,16 +114,28 @@ def add_history_features(df: pd.DataFrame) -> pd.DataFrame:
     
 
 
-def time_split(df: pd.DataFrame, time_col: str = "created_at",
-               test_fraction: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame]:
-     if not 0 < test_fraction < 1:
-      raise ValueError("test_fraction must be between 0 and 1")
-     n_test = np.ceil(len(df) * test_fraction).astype(int)
-     x=df.sort_values(time_col)
-     boundary=x.iloc[-n_test][time_col]
-     train,test=x[x[time_col]<boundary],x[x[time_col]>=boundary]
-     return train,test
-    
+
+def time_split(
+    df: pd.DataFrame,
+    time_col: str = "created_at",
+    test_fraction: float = 0.2
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+
+    if not 0 < test_fraction < 1:
+        raise ValueError("test_fraction must be between 0 and 1")
+
+    n_test = int(np.ceil(len(df) * test_fraction))
+
+    sorted_df = df.sort_values(time_col)
+
+    boundary = sorted_df.iloc[-n_test][time_col]
+
+    train = sorted_df[sorted_df[time_col] < boundary]
+    test = sorted_df[sorted_df[time_col] >= boundary]
+
+    return train, test
+
+
     
 """Return (train, test).
 
